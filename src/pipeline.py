@@ -5,14 +5,12 @@ import numpy as np
 
 from PIL import Image
 from PIL.ExifTags import TAGS
+from cp_hw2 import writeHDR
 
-def main():
-    linearize_images()
-
-def linearize_images():
+def linearize_images(stack_path):
     downsample = 200
 
-    data_path = Path("data/door_stack")
+    data_path = Path(stack_path)
     image_path = data_path / Path(f"exposure1.jpg")
 
     image = load_and_reshape_image(image_path, downsample=downsample)
@@ -31,10 +29,12 @@ def linearize_images():
     print(f"A shape: {A.shape}")
     print(f"b shape: {b.shape}")
 
+    weighting_scheme = "tent"
+
     row = 0
     for i in range(1, 254 + 1):
         l = 1
-        w = weight(i / 255.0) * l
+        w = weight(i / 255.0, weighting_scheme) * l
         A[row, i-1] = w
         A[row, i] = -2*w
         A[row, i+1] = w
@@ -50,10 +50,10 @@ def linearize_images():
         for i in range(num_samples):
             for c in range(3):
                 channel_intensity = image[i, c]
-                w = weight(channel_intensity / 255.0)
+                w = weight(channel_intensity / 255.0, weighting_scheme)
                 A[row, channel_intensity] = w
                 A[row, num_intensities + 3 * i + c] = -w
-                b[row] = w * log_t          # TODO: Add lambda value here
+                b[row] = w * log_t
                 row += 1
 
     print("Solving system of equations")
@@ -65,7 +65,6 @@ def linearize_images():
     plt.show()
 
     for img in range(1, 16+1, 4):
-
         image_path = data_path / Path(f"exposure{img}.jpg")
         image = cv.imread(image_path)
 
@@ -75,26 +74,34 @@ def linearize_images():
 
         image = np.exp(g[image])
 
-        # min_val = np.min(image)
-        # max_val = np.max(image)
-        # image = (image - min_val) / (max_val - min_val)
-
         plt.imshow(image)
         plt.title("Linearized image")
         plt.show()
 
-def weight(z, scheme="uniform"):
+def weight(z, t_k=None, scheme="uniform"):
+    Z_min, Z_max = 0.05, 0.95
+    
     match scheme:
         case "uniform":
-            Z_min, Z_max = 0.05, 0.95
             if Z_min <= z and z <= Z_max:
                 return 1
             return 0
+        case "tent":
+            if Z_min <= z and z <= Z_max:
+                return min(z, 1-z)
+            return 0
+        case "gaussian":
+            if Z_min <= z and z <= Z_max:
+                return np.exp(-4 * (z - 0.5)**2 / 0.5**2)
+            return 0
+        case "photon":
+            if Z_min <= z and z <= Z_max:
+                raise NotImplementedError
 
 def load_and_reshape_image(image_path, downsample=1):
     """Reshapes the image so each row is a RGB pixel value"""
     # TODO: Double check that it is RGB
-    image = cv.imread(image_path)[0::downsample, 0::downsample]
+    image = cv.imread(image_path)[::downsample, ::downsample]
     return image.transpose(2,0,1).reshape(3,-1).transpose()
 
 def get_image_exposure_time(image_path):
@@ -108,6 +115,101 @@ def get_image_exposure_time(image_path):
                 return float(value)
         
     raise ValueError(f"Exposure time not found in {image_path}")
+
+def HDR_linear(stack_path, file_type):
+    data_path = Path(stack_path)
+    downsample = 20
+    
+    weighting_scheme = "uniform"
+
+    if file_type == "tiff":
+        image_path = data_path / Path(f"exposure1.{file_type}")
+        print(image_path)
+        image = cv.imread(image_path)
+    elif file_type == "jpg":
+        pass
+    
+    print(np.max(image))
+    print(np.min(image))
+
+    HDR_numer = np.zeros(image[::downsample, ::downsample].shape)
+    HDR_denom = np.zeros_like(HDR_numer)
+
+    def process_numer_pixel(I_ldr, I_lin, t_k):
+        val = weight(I_ldr, t_k, weighting_scheme) * I_lin / t_k
+        return val
+
+    def process_denom_pixel(I_ldr, t_k):
+        val = weight(I_ldr, t_k, weighting_scheme)
+        return val    
+
+    vector_process_numer_pixel = np.vectorize(process_numer_pixel)
+    vector_process_denom_pixel = np.vectorize(process_denom_pixel)
+    
+    # for each image...
+    # assume .tiff for now...
+    for img in range(1, 1+1):
+        image_path_ldr = stack_path / Path(f"exposure{img}.tiff")
+        image_path_lin = stack_path / Path(f"exposure{img}.tiff")
+
+        image_ldr = cv.imread(image_path_ldr, cv.IMREAD_UNCHANGED)[0::downsample, 0::downsample] / (2**16 - 1)
+        image_lin = cv.imread(image_path_lin, cv.IMREAD_UNCHANGED)[0::downsample, 0::downsample] / (2**16 - 1)
+
+        # Just use the jpg for the exposure because it's easier
+        t_k = get_image_exposure_time(stack_path / Path(f"exposure{img}.jpg"))
+        print(f"t_k = {t_k}")
+
+        image_numer = vector_process_numer_pixel(image_ldr, image_lin, t_k)
+        image_denom = vector_process_denom_pixel(image_ldr, t_k)
+
+        # TODO: Add warning if all the values are not valid.
+
+        HDR_numer += image_numer
+        HDR_denom += image_denom
+
+    print(HDR_numer.shape)
+    print(f"numer nans = {np.isnan(HDR_numer).sum()}")
+    print(f"denom nans = {np.isnan(HDR_denom).sum()}")
+
+    print(f"numer zeros = {np.count_nonzero(HDR_numer == 0)}")
+    print(f"denom zeros = {np.count_nonzero(HDR_denom == 0)}")
+
+    print(f"numer ones = {np.count_nonzero(HDR_numer == 1)}")
+    print(f"denom ones = {np.count_nonzero(HDR_denom == 1)}")   
+
+    HDR_denom[HDR_denom == 0] = 0.0001
+
+    HDR = HDR_numer / HDR_denom
+    
+    print(np.mean(HDR))
+    HDR = HDR / np.mean(HDR) / 2
+    print(np.mean(HDR))
+
+    print(np.max(HDR))
+    print(np.min(HDR))
+
+    # HDR = np.clip(HDR, 0, 1)
+    # HDR = gamma_encoding(HDR)
+
+    plt.imshow(HDR)
+    plt.show()
+
+    writeHDR("test.hdr", HDR)
+
+
+def gamma_encoding(image):
+    def _gamma_encoding(x):
+        if x <= 0.0031308:
+            return 12.92 * x
+        return (1 + 0.055) * (x ** (1 / 2.4)) - 0.055
+
+    vector_gamma = np.vectorize(_gamma_encoding)
+    gamma_encoded_image = vector_gamma(image)
+    return np.clip(vector_gamma(gamma_encoded_image), 0, 1)
+
+def main():
+    HDR_linear("data/door_stack", "tiff")
+
 
 if __name__ == "__main__":
     main()
