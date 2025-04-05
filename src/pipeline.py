@@ -79,7 +79,7 @@ def linearize_images(stack_path):
         plt.show()
 
 def weight(z, t_k=None, scheme="uniform"):
-    # Z_min, Z_max = 0.000001, 0.9999999
+    # Z_min, Z_max = 0.05, 0.95
     Z_min, Z_max = 0, 1
 
     match scheme:
@@ -117,11 +117,9 @@ def get_image_exposure_time(image_path):
         
     raise ValueError(f"Exposure time not found in {image_path}")
 
-def HDR_linear(stack_path, file_type):
+def merge_hdr(stack_path, method, weighting_scheme, file_type):
     data_path = Path(stack_path)
-    downsample = 20
-    
-    weighting_scheme = "photon"
+    downsample = 1
 
     if file_type == "tiff":
         image_path = data_path / Path(f"exposure1.{file_type}")
@@ -134,21 +132,36 @@ def HDR_linear(stack_path, file_type):
     print(f"Numer shape = {HDR_numer.shape}")
     HDR_denom = np.zeros_like(HDR_numer)
 
-    def process_numer_pixel(I_ldr, I_lin, t_k):
+    def process_numer_pixel_linear(I_ldr, I_lin, t_k):
         w = weight(I_ldr, t_k, weighting_scheme)
         val = w * I_lin * t_k
         return val
 
-    def process_denom_pixel(I_ldr, t_k):
+    def process_denom_pixel_linear(I_ldr, t_k):
         val = weight(I_ldr, t_k, weighting_scheme)
         return val
 
-    vector_process_numer_pixel = np.vectorize(process_numer_pixel)
-    vector_process_denom_pixel = np.vectorize(process_denom_pixel)
+    vector_process_numer_pixel_linear = np.vectorize(process_numer_pixel_linear)
+    vector_process_denom_pixel_linear = np.vectorize(process_denom_pixel_linear)
     
+    e = 0.000001
+
+    def process_numer_pixel_exponential(I_ldr, I_lin, t_k):
+        w = weight(I_ldr, t_k, weighting_scheme)
+        val = w * (np.log(I_lin + e) - np.log(t_k))
+        return val
+
+    def process_denom_pixel_exponential(I_ldr, t_k):
+        val = weight(I_ldr, t_k, weighting_scheme)
+        return val
+
+    vector_process_numer_pixel_exponential = np.vectorize(process_numer_pixel_exponential)
+    vector_process_denom_pixel_exponential = np.vectorize(process_denom_pixel_exponential)
+
     # for each image...
     # assume .tiff for now...
     for img in range(1, 16+1):
+        # TODO: Path for lin will have to change when working with jpg
         image_path_ldr = stack_path / Path(f"exposure{img}.tiff")
         image_path_lin = stack_path / Path(f"exposure{img}.tiff")
 
@@ -165,8 +178,13 @@ def HDR_linear(stack_path, file_type):
         # mask = np.any(image_lin < 0.0, axis=2)
         # image_lin[mask] = 0
 
-        image_numer = vector_process_numer_pixel(image_ldr, image_lin, t_k)
-        image_denom = vector_process_denom_pixel(image_ldr, t_k)
+        if method == "linear":
+            image_numer = vector_process_numer_pixel_linear(image_ldr, image_lin, t_k)
+            image_denom = vector_process_denom_pixel_linear(image_ldr, t_k)
+
+        if method == "exponential":
+            image_numer = vector_process_numer_pixel_exponential(image_ldr, image_lin, t_k)
+            image_denom = vector_process_denom_pixel_exponential(image_ldr, t_k) 
 
         HDR_numer += image_numer
         HDR_denom += image_denom
@@ -183,12 +201,26 @@ def HDR_linear(stack_path, file_type):
 
     # HDR *= 0.5
 
-    # HDR = gamma_encoding(HDR)
+    HDR = gamma_encoding(HDR)
     HDR = np.clip(HDR, 0, 1)
-    plt.imshow(HDR)
-    plt.show()
+    # plt.imshow(HDR)
+    # plt.show()
 
-    writeHDR("test.hdr", HDR)
+    print(HDR.shape)
+
+    if HDR.dtype == np.float64:
+        HDR = HDR.astype(np.float32)
+
+    # plt.imshow(HDR)
+    # plt.title("Original")
+    # plt.show()
+    HDR = cv.cvtColor(HDR, cv.COLOR_BGR2RGB)
+    # plt.imshow(HDR)
+    # plt.title("Swapped")
+    # plt.show()
+
+    writeHDR(f"merged_images/{method}_{weighting_scheme}_{file_type}.hdr", HDR)
+    plt.imsave(f"merged_images/{method}_{weighting_scheme}_{file_type}.png", HDR)
 
 
 def gamma_encoding(image):
@@ -203,4 +235,8 @@ def gamma_encoding(image):
 
 
 if __name__ == "__main__":
-    HDR_linear("data/door_stack", "tiff")
+
+    merge_hdr("data/door_stack", "exponential", "tent", "tiff")
+    for method in ["linear", "exponential"]:
+        for scheme in ["uniform", "tent", "gaussian", "photon"]:
+            merge_hdr("data/door_stack", method, scheme, "tiff")
