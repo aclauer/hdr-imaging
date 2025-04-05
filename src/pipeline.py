@@ -79,8 +79,9 @@ def linearize_images(stack_path):
         plt.show()
 
 def weight(z, t_k=None, scheme="uniform"):
-    Z_min, Z_max = 0.05, 0.95
-    
+    # Z_min, Z_max = 0.000001, 0.9999999
+    Z_min, Z_max = 0, 1
+
     match scheme:
         case "uniform":
             if Z_min <= z and z <= Z_max:
@@ -96,11 +97,11 @@ def weight(z, t_k=None, scheme="uniform"):
             return 0
         case "photon":
             if Z_min <= z and z <= Z_max:
-                raise NotImplementedError
+                return t_k
+            return 0
 
 def load_and_reshape_image(image_path, downsample=1):
     """Reshapes the image so each row is a RGB pixel value"""
-    # TODO: Double check that it is RGB
     image = cv.imread(image_path)[::downsample, ::downsample]
     return image.transpose(2,0,1).reshape(3,-1).transpose()
 
@@ -120,7 +121,7 @@ def HDR_linear(stack_path, file_type):
     data_path = Path(stack_path)
     downsample = 20
     
-    weighting_scheme = "uniform"
+    weighting_scheme = "photon"
 
     if file_type == "tiff":
         image_path = data_path / Path(f"exposure1.{file_type}")
@@ -128,27 +129,26 @@ def HDR_linear(stack_path, file_type):
         image = cv.imread(image_path)
     elif file_type == "jpg":
         pass
-    
-    print(np.max(image))
-    print(np.min(image))
 
     HDR_numer = np.zeros(image[::downsample, ::downsample].shape)
+    print(f"Numer shape = {HDR_numer.shape}")
     HDR_denom = np.zeros_like(HDR_numer)
 
     def process_numer_pixel(I_ldr, I_lin, t_k):
-        val = weight(I_ldr, t_k, weighting_scheme) * I_lin / t_k
+        w = weight(I_ldr, t_k, weighting_scheme)
+        val = w * I_lin * t_k
         return val
 
     def process_denom_pixel(I_ldr, t_k):
         val = weight(I_ldr, t_k, weighting_scheme)
-        return val    
+        return val
 
     vector_process_numer_pixel = np.vectorize(process_numer_pixel)
     vector_process_denom_pixel = np.vectorize(process_denom_pixel)
     
     # for each image...
     # assume .tiff for now...
-    for img in range(1, 1+1):
+    for img in range(1, 16+1):
         image_path_ldr = stack_path / Path(f"exposure{img}.tiff")
         image_path_lin = stack_path / Path(f"exposure{img}.tiff")
 
@@ -159,38 +159,32 @@ def HDR_linear(stack_path, file_type):
         t_k = get_image_exposure_time(stack_path / Path(f"exposure{img}.jpg"))
         print(f"t_k = {t_k}")
 
+        # mask = np.any(image_ldr < 0.1, axis=2)
+        # image_ldr[mask] = 0
+
+        # mask = np.any(image_lin < 0.0, axis=2)
+        # image_lin[mask] = 0
+
         image_numer = vector_process_numer_pixel(image_ldr, image_lin, t_k)
         image_denom = vector_process_denom_pixel(image_ldr, t_k)
-
-        # TODO: Add warning if all the values are not valid.
 
         HDR_numer += image_numer
         HDR_denom += image_denom
 
-    print(HDR_numer.shape)
-    print(f"numer nans = {np.isnan(HDR_numer).sum()}")
-    print(f"denom nans = {np.isnan(HDR_denom).sum()}")
+    HDR_denom[HDR_denom == 0] = 0.01
+    HDR_numer[HDR_denom == 0] = 0
+    HDR_numer /= np.max(HDR_numer)
 
-    print(f"numer zeros = {np.count_nonzero(HDR_numer == 0)}")
-    print(f"denom zeros = {np.count_nonzero(HDR_denom == 0)}")
-
-    print(f"numer ones = {np.count_nonzero(HDR_numer == 1)}")
-    print(f"denom ones = {np.count_nonzero(HDR_denom == 1)}")   
-
-    HDR_denom[HDR_denom == 0] = 0.0001
+    print(HDR_denom.shape)
+    print(f"Number of hdr denom zeros = {np.count_nonzero(HDR_denom == 0)}")
 
     HDR = HDR_numer / HDR_denom
-    
-    print(np.mean(HDR))
     HDR = HDR / np.mean(HDR) / 2
-    print(np.mean(HDR))
 
-    print(np.max(HDR))
-    print(np.min(HDR))
+    # HDR *= 0.5
 
-    # HDR = np.clip(HDR, 0, 1)
     # HDR = gamma_encoding(HDR)
-
+    HDR = np.clip(HDR, 0, 1)
     plt.imshow(HDR)
     plt.show()
 
@@ -207,9 +201,6 @@ def gamma_encoding(image):
     gamma_encoded_image = vector_gamma(image)
     return np.clip(vector_gamma(gamma_encoded_image), 0, 1)
 
-def main():
-    HDR_linear("data/door_stack", "tiff")
-
 
 if __name__ == "__main__":
-    main()
+    HDR_linear("data/door_stack", "tiff")
