@@ -1,3 +1,4 @@
+import multiprocessing
 import cv2 as cv
 import matplotlib.pyplot as plt
 from pathlib import Path
@@ -5,7 +6,7 @@ import numpy as np
 
 from PIL import Image
 from PIL.ExifTags import TAGS
-from cp_hw2 import writeHDR
+from cp_hw2 import writeHDR, read_colorchecker_gm, readHDR
 
 def linearize_images(stack_path):
     downsample = 200
@@ -119,11 +120,10 @@ def get_image_exposure_time(image_path):
 
 def merge_hdr(stack_path, method, weighting_scheme, file_type):
     data_path = Path(stack_path)
-    downsample = 1
+    downsample = 10
 
     if file_type == "tiff":
         image_path = data_path / Path(f"exposure1.{file_type}")
-        print(image_path)
         image = cv.imread(image_path)
     elif file_type == "jpg":
         pass
@@ -172,12 +172,6 @@ def merge_hdr(stack_path, method, weighting_scheme, file_type):
         t_k = get_image_exposure_time(stack_path / Path(f"exposure{img}.jpg"))
         print(f"t_k = {t_k}")
 
-        # mask = np.any(image_ldr < 0.1, axis=2)
-        # image_ldr[mask] = 0
-
-        # mask = np.any(image_lin < 0.0, axis=2)
-        # image_lin[mask] = 0
-
         if method == "linear":
             image_numer = vector_process_numer_pixel_linear(image_ldr, image_lin, t_k)
             image_denom = vector_process_denom_pixel_linear(image_ldr, t_k)
@@ -199,25 +193,22 @@ def merge_hdr(stack_path, method, weighting_scheme, file_type):
     HDR = HDR_numer / HDR_denom
     HDR = HDR / np.mean(HDR) / 2
 
-    # HDR *= 0.5
-
-    HDR = gamma_encoding(HDR)
-    HDR = np.clip(HDR, 0, 1)
-    # plt.imshow(HDR)
-    # plt.show()
+    # if method == "exponential" and weighting_scheme == "uniform":
+    # if method == "exponential" and weighting_scheme != "tent" and weighting_scheme != "gaussian":
+    if method == "exponential":
+        HDR *= 0.75
+        HDR = np.clip(HDR, 0, 1)
+        HDR = 1 - HDR
+    else:
+        HDR = gamma_encoding(HDR)
+        HDR = np.clip(HDR, 0, 1)
 
     print(HDR.shape)
 
     if HDR.dtype == np.float64:
         HDR = HDR.astype(np.float32)
 
-    # plt.imshow(HDR)
-    # plt.title("Original")
-    # plt.show()
     HDR = cv.cvtColor(HDR, cv.COLOR_BGR2RGB)
-    # plt.imshow(HDR)
-    # plt.title("Swapped")
-    # plt.show()
 
     writeHDR(f"merged_images/{method}_{weighting_scheme}_{file_type}.hdr", HDR)
     plt.imsave(f"merged_images/{method}_{weighting_scheme}_{file_type}.png", HDR)
@@ -234,9 +225,88 @@ def gamma_encoding(image):
     return np.clip(vector_gamma(gamma_encoded_image), 0, 1)
 
 
-if __name__ == "__main__":
+def color_correction(hdr_image):
+    color_locations = np.load("color_locations.npy")
+    rgb_averages = []
+    for i in range(0, 48, 2):
+        y1, x1 = color_locations[i] / 10        # REMOVE IF THERE IS NO DOWN SAMPLING
+        y2, x2 = color_locations[i+1] / 10
+        square = hdr_image[int(x1):int(x2), int(y1):int(y2)]
 
-    merge_hdr("data/door_stack", "exponential", "tent", "tiff")
-    for method in ["linear", "exponential"]:
-        for scheme in ["uniform", "tent", "gaussian", "photon"]:
-            merge_hdr("data/door_stack", method, scheme, "tiff")
+        averages = square.mean(axis=(0, 1))        
+        rgb_averages.append((averages[2], averages[1], averages[0]))
+
+    rgb_averages = np.array(rgb_averages, dtype=np.float32)
+    r_gt, g_gt, b_gt = read_colorchecker_gm()
+
+    ground_truth = np.stack([r_gt, g_gt, b_gt], axis=-1).reshape(-1, 3)
+    rgb_averages_h = np.hstack([rgb_averages, np.ones((24, 1))])
+
+    A, _, _, _ = np.linalg.lstsq(rgb_averages_h, ground_truth, rcond=None)
+
+    A = A.T
+
+    H, W, _ = hdr_image.shape
+    pixels = hdr_image.reshape(-1, 3)
+
+    pixels_h = np.hstack([pixels, np.ones((pixels.shape[0], 1))])
+    color_corrected = (A @ pixels_h.T).T
+
+    color_corrected = np.clip(color_corrected, 0, 1)
+    corrected_image = color_corrected.reshape(H, W, 3)
+
+    # if corrected_image.dtype == np.float64:
+    #     corrected_image = corrected_image.astype(np.float32)
+    # corrected_image = cv.cvtColor(corrected_image, cv.COLOR_BGR2RGB)
+
+    # return corrected_image
+    
+    w1, w2 = color_locations[18], color_locations[19]
+    wy1, wx1 = w1 / 10 # REMOVE IF THERE IS NO DOWNSAMPLING
+    wy2, wx2 = w2 / 10
+    
+    image_white_rgb = np.mean(corrected_image[int(wy1):int(wy2), int(wx1):int(wx2)], axis=(0, 1))
+    image_white_rgb[image_white_rgb == 0] = 1
+
+    ground_truth_white_rgb = gamma_encoding(np.clip(ground_truth[18], 0, 1))
+
+    scaling_factors = ground_truth_white_rgb / image_white_rgb
+
+    balanced_image = np.zeros_like(hdr_image)
+
+    balanced_image[:, :, 0] = hdr_image[:, :, 0] * scaling_factors[0]
+    balanced_image[:, :, 1] = hdr_image[:, :, 1] * scaling_factors[1]
+    balanced_image[:, :, 2] = hdr_image[:, :, 2] * scaling_factors[2]
+
+    balanced_image = np.clip(balanced_image / 255.0, 0, 1)
+    return balanced_image
+
+
+def run_full_pipeline(method, scheme):
+    print(f"============ Running pipeline for {method} {scheme} ============")
+    merge_hdr("data/door_stack", method, scheme, "tiff")
+
+    path = Path(f"merged_images/{method}_{scheme}_tiff.png")
+    print(f"Color correcting {path}")
+    hdr_image = cv.imread(f"merged_images/{method}_{scheme}_tiff.png")
+
+    corrected_image = color_correction(hdr_image)
+
+    if corrected_image.dtype == np.float64:
+        corrected_image = corrected_image.astype(np.float32)
+    corrected_image = cv.cvtColor(corrected_image, cv.COLOR_BGR2RGB)
+
+    writeHDR(f"corrected_images/{method}_{scheme}_tiff.hdr", corrected_image)
+    plt.imsave(f"corrected_images/{method}_{scheme}_tiff.png", corrected_image)
+
+if __name__ == "__main__":
+    # merge_hdr("data/door_stack", "exponential", "tent", "tiff")
+    # merge_hdr("data/door_stack", "exponential", "gaussian", "tiff")
+
+    methods = ["linear", "exponential"]
+    schemes = ["uniform", "tent", "gaussian", "photon"]
+
+    with multiprocessing.Pool() as pool:
+        pool.starmap(run_full_pipeline, [(method, scheme) for method in methods for scheme in schemes])
+
+    # run_full_pipeline("linear", "tent")
