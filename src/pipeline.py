@@ -8,6 +8,8 @@ from PIL import Image
 from PIL.ExifTags import TAGS
 from cp_hw2 import writeHDR, read_colorchecker_gm, readHDR
 
+d = 1
+
 def linearize_images(stack_path):
     downsample = 200
 
@@ -120,7 +122,7 @@ def get_image_exposure_time(image_path):
 
 def merge_hdr(stack_path, method, weighting_scheme, file_type):
     data_path = Path(stack_path)
-    downsample = 10
+    downsample = d
 
     if file_type == "tiff":
         image_path = data_path / Path(f"exposure1.{file_type}")
@@ -170,7 +172,7 @@ def merge_hdr(stack_path, method, weighting_scheme, file_type):
 
         # Just use the jpg for the exposure because it's easier
         t_k = get_image_exposure_time(stack_path / Path(f"exposure{img}.jpg"))
-        print(f"t_k = {t_k}")
+        print(f"{method} {weighting_scheme} {file_type}: t_k = {t_k}")
 
         if method == "linear":
             image_numer = vector_process_numer_pixel_linear(image_ldr, image_lin, t_k)
@@ -229,8 +231,8 @@ def color_correction(hdr_image):
     color_locations = np.load("color_locations.npy")
     rgb_averages = []
     for i in range(0, 48, 2):
-        y1, x1 = color_locations[i] / 10        # REMOVE IF THERE IS NO DOWN SAMPLING
-        y2, x2 = color_locations[i+1] / 10
+        y1, x1 = color_locations[i] / d        # REMOVE IF THERE IS NO DOWN SAMPLING
+        y2, x2 = color_locations[i+1] / d
         square = hdr_image[int(x1):int(x2), int(y1):int(y2)]
 
         averages = square.mean(axis=(0, 1))        
@@ -262,8 +264,8 @@ def color_correction(hdr_image):
     # return corrected_image
     
     w1, w2 = color_locations[18], color_locations[19]
-    wy1, wx1 = w1 / 10 # REMOVE IF THERE IS NO DOWNSAMPLING
-    wy2, wx2 = w2 / 10
+    wy1, wx1 = w1 / d # REMOVE IF THERE IS NO DOWNSAMPLING
+    wy2, wx2 = w2 / d
     
     image_white_rgb = np.mean(corrected_image[int(wy1):int(wy2), int(wx1):int(wx2)], axis=(0, 1))
     image_white_rgb[image_white_rgb == 0] = 1
@@ -306,7 +308,7 @@ if __name__ == "__main__":
     methods = ["linear", "exponential"]
     schemes = ["uniform", "tent", "gaussian", "photon"]
 
-    with multiprocessing.Pool() as pool:
+    with multiprocessing.Pool(processes=4) as pool:
         pool.starmap(run_full_pipeline, [(method, scheme) for method in methods for scheme in schemes])
 
     # run_full_pipeline("linear", "tent")
