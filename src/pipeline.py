@@ -6,7 +6,7 @@ import numpy as np
 
 from PIL import Image
 from PIL.ExifTags import TAGS
-from cp_hw2 import writeHDR, read_colorchecker_gm, readHDR
+from cp_hw2 import writeHDR, read_colorchecker_gm, readHDR, lRGB2XYZ, XYZ2lRGB
 
 d = 1
 
@@ -283,6 +283,56 @@ def color_correction(hdr_image):
     balanced_image = np.clip(balanced_image / 255.0, 0, 1)
     return balanced_image
 
+def tonemap_rgb(hdr_image, K=0.15, B=0.95, epsilon=1e-6):
+    # Convert to luminance (perceived brightness)
+    luminance = 0.2126 * hdr_image[:, :, 0] + 0.7152 * hdr_image[:, :, 1] + 0.0722 * hdr_image[:, :, 2]
+    
+    log_avg = np.exp(np.mean(np.log(luminance + epsilon)))
+    scaled_luminance = (K / log_avg) * luminance
+    I_white = B * np.max(scaled_luminance)
+
+    tonemapped_lum = (scaled_luminance * (1 + scaled_luminance / (I_white**2))) / (1 + scaled_luminance)
+
+    # Apply ratio of new/old luminance to all RGB channels
+    scale = tonemapped_lum / (luminance + epsilon)
+    tonemapped_rgb = hdr_image * scale[:, :, np.newaxis]
+
+    if tonemapped_rgb.dtype == np.float64:
+        tonemapped_rgb = tonemapped_rgb.astype(np.float32)
+    tonemapped_rgb = cv.cvtColor(tonemapped_rgb, cv.COLOR_BGR2RGB)
+
+    return np.clip(tonemapped_rgb, 0, 1)
+
+def tonemap_luminance(hdr_image, K=0.15, B=0.95, epsilon=1e-6):
+    # Convert to XYZ color space
+    XYZ = lRGB2XYZ(hdr_image)
+
+    X, Y, Z = XYZ[:, :, 0], XYZ[:, :, 1], XYZ[:, :, 2]
+    total = X + Y + Z + epsilon
+
+    # Compute chromaticity
+    x = X / total
+    y = Y / total
+
+    log_avg = np.exp(np.mean(np.log(Y + epsilon)))
+    scaled_Y = (K / log_avg) * Y
+    I_white = B * np.max(scaled_Y)
+
+    tonemapped_Y = (scaled_Y * (1 + scaled_Y / (I_white**2))) / (1 + scaled_Y)
+
+    # Rebuild XYZ from x, y, and new Y
+    X_new = (tonemapped_Y / y) * x
+    Z_new = (tonemapped_Y / y) * (1 - x - y)
+    XYZ_new = np.stack([X_new, tonemapped_Y, Z_new], axis=2)
+
+    # Convert back to linear RGB
+    tonemapped_rgb = XYZ2lRGB(XYZ_new)
+
+    if tonemapped_rgb.dtype == np.float64:
+        tonemapped_rgb = tonemapped_rgb.astype(np.float32)
+    tonemapped_rgb = cv.cvtColor(tonemapped_rgb, cv.COLOR_BGR2RGB)
+
+    return np.clip(tonemapped_rgb, 0, 1)
 
 def run_full_pipeline(method, scheme):
     print(f"============ Running pipeline for {method} {scheme} ============")
@@ -305,10 +355,23 @@ if __name__ == "__main__":
     # merge_hdr("data/door_stack", "exponential", "tent", "tiff")
     # merge_hdr("data/door_stack", "exponential", "gaussian", "tiff")
 
-    methods = ["linear", "exponential"]
-    schemes = ["uniform", "tent", "gaussian", "photon"]
+    # methods = ["linear", "exponential"]
+    # schemes = ["uniform", "tent", "gaussian", "photon"]
 
-    with multiprocessing.Pool(processes=4) as pool:
-        pool.starmap(run_full_pipeline, [(method, scheme) for method in methods for scheme in schemes])
+    # with multiprocessing.Pool(processes=4) as pool:
+    #     pool.starmap(run_full_pipeline, [(method, scheme) for method in methods for scheme in schemes])
 
     # run_full_pipeline("linear", "tent")
+
+    # readHDR("corrected_images/linear_gaussian_tiff.hdr")
+    image = cv.imread("corrected_images/linear_gaussian_tiff.png")
+    K = 0.05
+    B = 0.99
+    # image = tonemap_rgb(image, K, B)
+    image = tonemap_luminance(image)
+
+    writeHDR(f"tone_mapped_images/linear_tent_tiff_lum_K={K}_B={B}.hdr", image)
+    plt.imsave(f"tone_mapped_images/linear_tent_tiff_lum_K={K}_B={B}.png", image)
+    
+    # plt.imshow(image)
+    # plt.show()
